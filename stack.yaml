@@ -1,0 +1,7 @@
+resolver: lts-13.12
+packages:
+- .
+extra-deps:
+  - network-3.0.1.1
+  - git: https://github.com/purescript/purescript.git
+    commit: e0910da84f58b988b1271b2c8e5e926b342c8925
