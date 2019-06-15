@@ -2,6 +2,7 @@ module Language.PureScript.Optimizer.Simplify where
 
 import Prelude
 
+import Data.Foldable (foldl')
 import Language.PureScript.Optimizer.CoreAnf
 
 simplify :: Expr a -> Expr a
@@ -11,7 +12,7 @@ simplify = run
     stop . go []
 
   stop (acc, expr) =
-    foldr (\(ann, n, a) -> Let ann n a) expr acc
+    foldl' (flip (\(ann, n, a) -> Let ann n a)) expr acc
 
   go acc = \case
     Let ann n a b -> do
