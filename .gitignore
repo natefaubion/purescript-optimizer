@@ -1,2 +1,5 @@
 .stack-work
 .DS_Store
+bower.json
+bower_components
+output

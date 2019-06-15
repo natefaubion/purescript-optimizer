@@ -73,6 +73,9 @@ dependencies:
 - containers
 - purescript
 - Glob
+- mtl
+- transformers
+- prettyprinter
 
 library:
   source-dirs: src

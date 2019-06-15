@@ -2,12 +2,9 @@ module Language.PureScript.Optimizer.Types where
 
 import Prelude
 
-import Language.PureScript.CoreFn as C
-
-data OptimizerAnn = OptimizerAnn
-  { optCfnAnn :: C.Ann
-  }
+import qualified Language.PureScript.CoreFn as C
+import Language.PureScript.Optimizer.CoreAnf
 
 data OptimizerResult = OptimizerResult
-  { optModule :: C.Module OptimizerAnn
+  { optModule :: Module C.Ann
   }
