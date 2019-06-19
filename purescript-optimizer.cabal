@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 18f742ed8fe266419468d2fb26e14ce876a77c99ce5dea192b992bd3952ab6ff
+-- hash: 22d959332a55b8d487dc2863b63b3499b2a8578e0f07d6a4e1c4bdca75d4d247
 
 name:           purescript-optimizer
 version:        0.1.0.0
@@ -41,11 +41,15 @@ library
     , async
     , base
     , containers
+    , dlist
+    , hashable
+    , microlens
     , mtl
     , prettyprinter
     , purescript
     , text
     , transformers
+    , unordered-containers
   default-language: Haskell2010
 
 executable purescript-optimizer-exe
@@ -61,12 +65,16 @@ executable purescript-optimizer-exe
     , async
     , base
     , containers
+    , dlist
+    , hashable
+    , microlens
     , mtl
     , prettyprinter
     , purescript
     , purescript-optimizer
     , text
     , transformers
+    , unordered-containers
   default-language: Haskell2010
 
 test-suite purescript-optimizer-test
@@ -83,10 +91,14 @@ test-suite purescript-optimizer-test
     , async
     , base
     , containers
+    , dlist
+    , hashable
+    , microlens
     , mtl
     , prettyprinter
     , purescript
     , purescript-optimizer
     , text
     , transformers
+    , unordered-containers
   default-language: Haskell2010

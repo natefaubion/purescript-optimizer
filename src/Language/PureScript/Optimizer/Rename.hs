@@ -5,41 +5,42 @@ import Prelude
 import Control.Monad (join)
 import qualified Control.Monad.State.Class as MS
 import qualified Control.Monad.Trans.State.Strict as S
-import qualified Data.List.NonEmpty as NE
-import Data.Foldable (fold)
+import Data.Coerce (coerce)
+import Data.Foldable (fold, toList)
+import Lens.Micro ((^.), _3)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, catMaybes)
+import Data.Maybe (catMaybes)
+import Data.Text (Text)
+import qualified Language.PureScript.AST.SourcePos as Pos
 import qualified Language.PureScript.CoreFn as C
 import qualified Language.PureScript.Names as N
 import Language.PureScript.Optimizer.CoreAnf
+import Language.PureScript.Optimizer.Types
 
-type Scope = M.Map (N.Qualified N.Ident) (NE.NonEmpty Name)
+type Scope = M.Map (N.Qualified N.Ident) Name
 
 data RenameState = RenameState
   { rsModuleName :: N.ModuleName
-  , rsFresh :: Integer
+  , rsFresh :: Int
   , rsScope :: Scope
   }
 
 freshName :: MS.MonadState RenameState m => m Name
 freshName = MS.state $ \st@(RenameState {..}) ->
-  ((rsModuleName, rsFresh), st { rsFresh = rsFresh + 1 })
+  (Name (coerce rsModuleName) rsFresh, st { rsFresh = rsFresh + 1 })
 
 bindName :: MS.MonadState RenameState m => N.Qualified N.Ident -> m Name
 bindName ident = MS.state $ \st@(RenameState {..}) -> do
   let
-    name = (fromMaybe rsModuleName (N.getQual ident), rsFresh)
-    alterFn = \case
-      Nothing -> Just $ pure name
-      Just ne -> Just $ NE.cons name ne
+    name = Name (getQual (coerce rsModuleName) ident) rsFresh
     scope =
       case N.getQual ident of
         Nothing ->
-          M.alter alterFn ident
-           . M.alter alterFn (N.Qualified (Just rsModuleName) . N.disqualify $ ident)
+          M.insert ident name
+           . M.insert (N.Qualified (Just rsModuleName) . N.disqualify $ ident) name
            $ rsScope
         Just _ ->
-          M.alter alterFn ident rsScope
+          M.insert ident name rsScope
   (name, st { rsFresh = rsFresh + 1, rsScope = scope })
 
 bindName' :: MS.MonadState RenameState m => N.Ident -> m Name
@@ -48,17 +49,14 @@ bindName' = bindName . N.Qualified Nothing
 assocName :: MS.MonadState RenameState m => N.Qualified N.Ident -> Name -> m ()
 assocName ident name = MS.state $ \st@(RenameState {..}) -> do
   let
-    alterFn = \case
-      Nothing -> Just $ pure name
-      Just ne -> Just $ NE.cons name ne
     scope =
       case N.getQual ident of
         Nothing ->
-          M.alter alterFn ident
-           . M.alter alterFn (N.Qualified (Just rsModuleName) . N.disqualify $ ident)
+          M.insert ident name
+           . M.insert (N.Qualified (Just rsModuleName) . N.disqualify $ ident) name
            $ rsScope
         Just _ ->
-          M.alter alterFn ident rsScope
+          M.insert ident name rsScope
   ((), st { rsScope = scope })
 
 assocName' :: MS.MonadState RenameState m => N.Ident -> Name -> m ()
@@ -75,7 +73,7 @@ getName ident = do
           : show rsModuleName
           : fmap show (M.toList rsScope))
         -- (fromMaybe rsModuleName . N.getQual $ ident, -1)
-    Just ne -> NE.head ne
+    Just n -> n
 
 currentModule :: MS.MonadState RenameState m => m N.ModuleName
 currentModule = do
@@ -89,7 +87,7 @@ scoped m = do
   MS.modify (\st -> st { rsScope = rsScope })
   pure $ res
 
-renameModule :: M.Map N.ModuleName (Module C.Ann) -> C.Module C.Ann -> Module C.Ann
+renameModule :: M.Map N.ModuleName (Module OptimizerAnn) -> C.Module C.Ann -> Module OptimizerAnn
 renameModule env (C.Module {..}) = flip S.evalState state $ do
   frn <- traverse goForeign moduleForeign
   decls <- join <$> traverse goBind moduleDecls
@@ -101,7 +99,7 @@ renameModule env (C.Module {..}) = flip S.evalState state $ do
     }
   where
   state =
-    RenameState moduleName 0 (scope <> M.singleton identUndefined (pure (prim, 0)))
+    RenameState moduleName 0 (scope <> M.singleton identUndefined (Name (coerce prim) 0))
 
   scope =
     fold
@@ -110,7 +108,7 @@ renameModule env (C.Module {..}) = flip S.evalState state $ do
       $ moduleImports
 
   nameFn mn (k, v) =
-    (N.Qualified (Just mn) k, pure $ fst v)
+    (N.Qualified (Just mn) k, fst v)
 
   scopeFn (Module {..}) =
     M.fromList
@@ -136,64 +134,74 @@ renameModule env (C.Module {..}) = flip S.evalState state $ do
     expr -> scoped $ do
       DeclExpr group <$> renameExpr expr
 
-renameExpr :: MS.MonadState RenameState m => C.Expr C.Ann -> m (Expr C.Ann)
+renameExpr :: MS.MonadState RenameState m => C.Expr C.Ann -> m (Expr OptimizerAnn)
 renameExpr = goExpr
   where
   goExpr = scoped . \case
     C.Literal ann a -> do
-      goLit ann a
+      goLit (optAnn ann) a
     C.Accessor ann p expr -> scoped $ do
       expr' <- goLetExpr expr
-      pure $ buildLet expr' $ Access ann (letName expr') p
+      pure $ buildLet [expr'] $ Access (optAnn ann) (letName expr') p
     C.ObjectUpdate ann expr pairs -> do
       expr' <- goLetExpr expr
       pairs' <- traverse (traverse goLetExpr) pairs
       pure
-       . buildLet expr'
-       . foldr (buildLet . snd) (Update ann (letName expr') . fmap (fmap letName) $ pairs')
+       . buildLet (expr' : fmap snd pairs')
+       . Update (optAnn ann) (letName expr')
+       . fmap (fmap letName)
        $ pairs'
     C.Abs ann n expr -> do
       n' <- bindName' n
-      Abs ann [n'] <$> goExpr expr
+      Abs (optAnn ann) [n'] <$> goExpr expr
     C.App ann a b -> do
       a' <- goLetExpr a
       b' <- goLetExpr b
       pure
-       . buildLet a'
-       . buildLet b'
-       $ App ann (letName a') [letName b']
-    C.Let _ bs expr -> do
+       . buildLet [a', b']
+       $ App (optAnn ann) (letName a') [letName b']
+    C.Let ann bs expr -> do
       bs' <- catMaybes <$> traverse goBind bs
       expr' <- goExpr expr
-      let
-        letFn b next = case b of
-          Left (ann, n, x) -> Let ann n x next
-          Right rs -> LetRec rs next
-      pure $ foldr letFn expr' bs'
+      pure $ Let (optAnn ann) bs' expr'
     C.Case ann exprs alts -> do
       exprs' <- traverse goLetExpr exprs
       alts' <- traverse goAlt alts
-      pure $ foldr buildLet (flip (Case ann) alts' . fmap letName $ exprs') exprs'
+      pure
+        . buildLet exprs'
+        . flip (Case (optAnn ann)) alts'
+        . fmap letName
+        $ exprs'
     C.Var ann v ->
-      Var ann <$> getName v
+      Var (optAnn ann) <$> getName v
     C.Constructor _ _ ident _ ->
       error $ "renameExpr: Invalid constructor " <> show ident
 
   goLit ann = \case
     C.ArrayLiteral exprs -> scoped $ do
       exprs' <- traverse goLetExpr exprs
-      pure $ foldr buildLet (Lit ann . C.ArrayLiteral . fmap letName $ exprs') exprs'
+      pure
+        . buildLet exprs'
+        . Lit ann
+        . C.ArrayLiteral
+        . fmap letName
+        $ exprs'
     C.ObjectLiteral pairs -> scoped $ do
       pairs' <- traverse (traverse goLetExpr) pairs
-      pure $ foldr (buildLet . snd) (Lit ann . C.ObjectLiteral . fmap (fmap letName) $ pairs') pairs'
+      pure
+        . buildLet (fmap snd pairs')
+        . Lit ann
+        . C.ObjectLiteral
+        . fmap (fmap letName)
+        $ pairs'
     C.NumericLiteral x ->
-      pure $ Lit ann (C.NumericLiteral x)
+      pure . Lit ann . C.NumericLiteral $ x
     C.StringLiteral x ->
-      pure $ Lit ann (C.StringLiteral x)
+      pure . Lit ann . C.StringLiteral $ x
     C.CharLiteral x ->
-      pure $ Lit ann (C.CharLiteral x)
+      pure . Lit ann . C.CharLiteral $ x
     C.BooleanLiteral x ->
-      pure $ Lit ann (C.BooleanLiteral x)
+      pure . Lit ann . C.BooleanLiteral $ x
 
   goBind = \case
     C.NonRec _ a (C.Var _ b) -> do
@@ -203,14 +211,14 @@ renameExpr = goExpr
     C.NonRec ann ident expr -> do
       n <- bindName' ident
       expr' <- goExpr expr
-      pure $ Just $ Left (ann, n, expr')
+      pure . Just $ NonRec (optAnn ann) n expr'
     C.Rec bs -> do
       let
         bindFn ((ann, ident), expr) =
-          (,expr) . (ann,) <$> bindName' ident
+          (,expr) . (optAnn ann,) <$> bindName' ident
       bs' <- traverse bindFn bs
       bs'' <- traverse (traverse goExpr) bs'
-      pure $ Just $ Right bs''
+      pure . Just $ Rec bs''
 
   goAlt (C.CaseAlternative bs res) =
     scoped $ CaseAlternative
@@ -219,15 +227,15 @@ renameExpr = goExpr
 
   goBinder = \case
     C.NullBinder ann ->
-      pure $ BinderWildcard ann
+      pure $ BinderWildcard (optAnn ann)
     C.LiteralBinder ann lit ->
-      BinderLit ann <$> goBinderLit lit
+      BinderLit (optAnn ann) <$> goBinderLit lit
     C.VarBinder ann ident ->
-      BinderVar ann <$> bindName' ident
+      BinderVar (optAnn ann) <$> bindName' ident
     C.NamedBinder ann ident b ->
-      BinderNamed ann <$> bindName' ident <*> goBinder b
+      BinderNamed (optAnn ann) <$> bindName' ident <*> goBinder b
     C.ConstructorBinder ann _ ctor args ->
-      BinderCtor ann <$> getName (ctorToIdent <$> ctor) <*> traverse goBinder args
+      BinderCtor (optAnn ann) <$> getName (ctorToIdent <$> ctor) <*> traverse goBinder args
 
   goBinderLit = \case
     C.ArrayLiteral bs ->
@@ -255,20 +263,31 @@ renameExpr = goExpr
     expr -> do
       n <- freshName
       expr' <- goExpr expr
-      pure $ Right (C.extractAnn expr, n, expr')
+      pure $ Right (optAnn . C.extractAnn $ expr, n, expr')
 
   letName = \case
     Left n -> n
     Right (_, n, _) -> n
 
-  buildLet = \case
-    Left _ -> id
-    Right (ann, n, rhs) -> Let ann n rhs
+  buildLet bs expr =
+    case bs >>= toList of
+      []  -> expr
+      b : bs' -> do
+        let
+          ann1 = b ^. _3 . exprAnn
+          ann2 = expr ^. exprAnn
+          ann  = ann2 { annSpan = Pos.widenSourceSpan (annSpan ann1) (annSpan ann2) }
+          bs'' = fmap (\(x, y, z) -> NonRec x y z) $ b : bs'
+        Let ann bs'' expr
 
 ctorToIdent :: N.ProperName 'N.ConstructorName -> N.Ident
 ctorToIdent = N.Ident . N.runProperName
 
+getQual :: [Text] -> N.Qualified a -> [Text]
+getQual def = maybe def coerce . N.getQual
+
 prim :: N.ModuleName
 prim = N.ModuleName [N.ProperName "Prim"]
+
 identUndefined :: N.Qualified N.Ident
 identUndefined = N.Qualified (Just prim) (N.Ident "undefined")

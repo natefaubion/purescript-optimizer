@@ -71,11 +71,15 @@ dependencies:
 - async
 - text
 - containers
+- unordered-containers
+- hashable
 - purescript
 - Glob
 - mtl
 - transformers
 - prettyprinter
+- microlens
+- dlist
 
 library:
   source-dirs: src

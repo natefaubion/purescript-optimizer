@@ -23,7 +23,7 @@ optimize deps cfnMod =
 
   declFn = \case
     DeclExpr ns expr ->
-      DeclExpr ns . simplify $ expr
+      DeclExpr ns . reassociate $ expr
     decl ->
       decl
 

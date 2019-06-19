@@ -2,26 +2,37 @@ module Language.PureScript.Optimizer.Simplify where
 
 import Prelude
 
+import qualified Data.DList as D
 import Data.Foldable (foldl')
 import Language.PureScript.Optimizer.CoreAnf
+import Lens.Micro ((^.))
 
-simplify :: Expr a -> Expr a
-simplify = run
+reassociate :: Expr a -> Expr a
+reassociate = run
   where
-  run =
-    stop . go []
+  run expr =
+    stop (expr ^. exprAnn) . go D.empty $ expr
 
-  stop (acc, expr) =
-    foldl' (flip (\(ann, n, a) -> Let ann n a)) expr acc
+  stop ann (acc, expr) =
+    case D.toList acc of
+      [] -> expr
+      bs -> Let ann bs expr
 
   go acc = \case
-    Let ann n a b -> do
+    Let ann bs expr -> do
       let
-        (acc', a') =
-          go acc a
-      go ((ann, n, a') : acc') b
-    LetRec bs expr ->
-      (acc, LetRec (fmap (fmap run) bs) . run $ expr)
+        bindingFn x = \case
+          NonRec a b c -> do
+            let
+              (x', c') =
+                go x c
+            D.snoc x' $ NonRec a b c'
+          Rec bs' -> do
+            D.snoc x
+              . Rec
+              . fmap (fmap run)
+              $ bs'
+      go (foldl' bindingFn acc bs) expr
     Abs ann ns expr ->
       (acc, Abs ann ns . run $ expr)
     Case ann ns alts -> do

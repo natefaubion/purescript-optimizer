@@ -2,14 +2,23 @@ module Language.PureScript.Optimizer.CoreAnf where
 
 import Prelude
 
+import Data.Coerce (coerce)
+import qualified Data.Hashable as H
 import qualified Data.Map as M
 import Data.Maybe (mapMaybe)
+import Data.Text (Text)
 import qualified Data.Text.Prettyprint.Doc as D
+import GHC.Generics (Generic)
 import qualified Language.PureScript.AST.Literals as L
 import qualified Language.PureScript.Names as N
 import Language.PureScript.PSString (PSString)
 
-type Name = (N.ModuleName, Integer)
+data Name = Name
+  { nameQual :: [Text]
+  , nameUnique :: Int
+  } deriving (Show, Eq, Ord, Generic)
+
+instance H.Hashable Name
 
 data Module a = Module
   { modName :: N.ModuleName
@@ -26,14 +35,18 @@ data Decl a
 
 data Expr a
   = Lit a (L.Literal Name)
-  | Let a Name (Expr a) (Expr a)
-  | LetRec [((a, Name), Expr a)] (Expr a)
+  | Let a [Binding a] (Expr a)
   | Abs a [Name] (Expr a)
   | App a Name [Name]
   | Var a Name
   | Access a Name PSString
   | Update a Name [(PSString, Name)]
   | Case a [Name] [CaseAlternative a]
+  deriving (Show, Functor)
+
+data Binding a
+  = NonRec a Name (Expr a)
+  | Rec [((a, Name), Expr a)]
   deriving (Show, Functor)
 
 data CaseAlternative a = CaseAlternative
@@ -53,6 +66,17 @@ data Binder a
   | BinderNamed a Name (Binder a)
   | BinderCtor a Name [Binder a]
   deriving (Show, Functor)
+
+exprAnn :: Functor f => (a -> f a) -> Expr a -> f (Expr a)
+exprAnn k = \case
+  Lit a b -> (\z -> Lit z b) <$> k a
+  Let a b c -> (\z -> Let z b c) <$> k a
+  Abs a b c -> (\z -> Abs z b c) <$> k a
+  App a b c -> (\z -> App z b c) <$> k a
+  Var a b -> (\z -> Var z b) <$> k a
+  Access a b c -> (\z -> Access z b c) <$> k a
+  Update a b c -> (\z -> Update z b c) <$> k a
+  Case a b c -> (\z -> Case z b c) <$> k a
 
 ppModule :: Module a -> D.Doc void
 ppModule (Module {..}) =
@@ -111,29 +135,12 @@ ppExpr mn = \case
     ppLit
       . fmap (ppName mn)
       $ x
-  Let _ n a b ->
-    D.vsep
-      [ ppName mn n D.<+> "="
-      , D.indent 2
-          . ppExpr mn
-          $ a
-      , ppExpr mn b
-      ]
-  LetRec bs a -> do
-    let
-      group = snd . fst <$> bs
-      ppBinding ((_, n), expr) =
-        D.vsep
-          [ ppName mn n <> ppRec group D.<+> "="
-          , D.indent 2
-              . ppExpr mn
-              $ expr
-          ]
+  Let _ bs expr -> do
     D.vsep
       [ D.vsep
-          . fmap ppBinding
+          . fmap (ppBinding mn)
           $ bs
-      , ppExpr mn a
+      , ppExpr mn expr
       ]
   Abs _ as b ->
     D.vsep
@@ -163,6 +170,29 @@ ppExpr mn = \case
           . fmap (ppCaseAlternative mn)
           $ alts
       ]
+
+ppBinding :: N.ModuleName -> Binding a -> D.Doc void
+ppBinding mn = \case
+  NonRec _ n a ->
+    D.vsep
+      [ ppName mn n D.<+> "="
+      , D.indent 2
+          . ppExpr mn
+          $ a
+      ]
+  Rec bs -> do
+    let
+      group = snd . fst <$> bs
+      ppFn ((_, n), expr) =
+        D.vsep
+          [ ppName mn n <> ppRec group D.<+> "="
+          , D.indent 2
+              . ppExpr mn
+              $ expr
+          ]
+    D.vsep
+      . fmap ppFn
+      $ bs
 
 ppCaseAlternative :: N.ModuleName -> CaseAlternative a -> D.Doc void
 ppCaseAlternative mn (CaseAlternative bs res) =
@@ -235,14 +265,14 @@ ppLit = \case
     if x then "true" else "false"
 
 ppName :: N.ModuleName -> Name -> D.Doc void
-ppName mn (mn', n)
-  | mn == mn' = "@" <> D.pretty n
-  | otherwise = D.pretty (N.runModuleName mn') <> "@" <> D.pretty n
+ppName mn (Name mn' n)
+  | mn == coerce mn' = "@" <> D.pretty n
+  | otherwise = D.pretty (N.runModuleName (coerce mn')) <> "@" <> D.pretty n
 
 ppRec :: [Name] -> D.Doc void
 ppRec group
   | [] <- group = mempty
   | otherwise =
       D.lbracket
-        <> D.hsep (D.punctuate D.comma (("@" <>) . D.pretty . snd <$> group))
+        <> D.hsep (D.punctuate D.comma (("@" <>) . D.pretty . nameUnique <$> group))
         <> D.rbracket
